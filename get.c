@@ -409,7 +409,7 @@ static boolean handleDirective (const int c)
 		case DRCTV_HASH:    ignore = directiveHash (c);  break;
 		case DRCTV_IF:      ignore = directiveIf (c);    break;
 		case DRCTV_PRAGMA:  directivePragma (c);         break;
-		case DRCTV_UNDEF:   directiveDefine (c);         break;
+		case DRCTV_UNDEF:   ignore = isIgnore ();        break;
 	}
 	return ignore;
 }
