@@ -239,6 +239,7 @@ typedef enum eTagType {
 
 typedef struct sParenInfo {
 	boolean isPointer;
+	boolean isConstructor;
 	boolean isParamList;
 	boolean isKnrParamList;
 	boolean isNameCandidate;
@@ -1338,7 +1339,7 @@ static int skipToNonWhite (void)
 		else
 			break;
 	}
-	if (CollectingSignature && found)
+	if (CollectingSignature && found && vStringLast(Signature) != ' ')
 		vStringPut (Signature, ' ');
 #endif
 
@@ -1368,12 +1369,12 @@ static void skipToFormattedBraceMatch (void)
  *  read the character which starts the group (i.e. the first character of
  *  "pair").
  */
-static void skipToMatch (const char *const pair)
+static int skipToMatch (const char *const pair)
 {
 	const boolean braceMatching = (boolean) (strcmp ("{}", pair) == 0);
 	const boolean braceFormatting = (boolean) (isBraceFormat () && braceMatching);
 	const unsigned int initialLevel = getDirectiveNestLevel ();
-	const int begin = pair [0], end = pair [1];
+	const int begin = pair [0], end = pair [1], guard = pair [2];
 	const unsigned long inputLineNumber = getInputLineNumber ();
 	int matchLevel = 1;
 	int c = '\0';
@@ -1400,6 +1401,10 @@ static void skipToMatch (const char *const pair)
 				break;
 			}
 		}
+		else if (guard != 0  &&  c == guard)
+		{
+			break;
+		}
 	}
 	if (c == EOF)
 	{
@@ -1410,6 +1415,8 @@ static void skipToMatch (const char *const pair)
 		else
 			longjmp (Exception, (int) ExceptionFormattingError);
 	}
+
+	return c;
 }
 
 static void skipParens (void)
@@ -1709,6 +1716,15 @@ static void readParents (statementInfo *const st, const int qualifier)
 static void skipStatement (statementInfo *const st)
 {
 	st->declaration = DECL_IGNORE;
+	/* why not DECL_NONE? if DECL_IGNORE is used here then variable var1
+	 * in following snippet will be skipped:
+	 * int fun1 (int a)
+	 * {
+	 *     if (a > 0) return a;
+	 *     SomeType var1( 4 );
+	 *     return var1;
+	 * } */
+	st->declaration = DECL_NONE;
 	skipToOneOf (";");
 }
 
@@ -2065,15 +2081,16 @@ static boolean languageSupportsGenerics (void)
 		isLanguage (Lang_java));
 }
 
-static void processAngleBracket (void)
+static int processAngleBracket (void)
 {
 	int c = cppGetc ();
 	if (c == '>') {
 		/* already found match for template */
 	} else if (languageSupportsGenerics () && c != '<' && c != '=') {
-		/* this is a template */
+		/* this is a template or sign "less" */
 		cppUngetc (c);
-		skipToMatch ("<>");
+		c = skipToMatch ("<>;");
+		cppUngetc (c);
 	} else if (c == '<') {
 		/* skip "<<" or "<<=". */
 		c = cppGetc ();
@@ -2083,6 +2100,8 @@ static void processAngleBracket (void)
 	} else {
 		cppUngetc (c);
 	}
+
+	return c;
 }
 
 static void parseJavaAnnotation (statementInfo *const st)
@@ -2110,6 +2129,40 @@ static void parseJavaAnnotation (statementInfo *const st)
 	}
 }
 
+static int skipFunctionPointer (parenInfo *const info)
+{
+	int c;
+
+	c = skipToNonWhite ();
+	if (c == '*')        /* check for function pointer */
+	{
+		vStringPut (Signature, c);
+		skipToMatch ("()");
+		c = skipToNonWhite ();
+		if (c == '(')
+		{
+			vStringPut (Signature, c);
+			skipToMatch ("()");
+		}
+		else
+			cppUngetc (c);
+	}
+	else
+	{
+		cppUngetc (c);
+		info->nestedArgs = TRUE;
+	}
+
+	return c;
+}
+
+static void setConstructorInfo (parenInfo *const info)
+{
+	info->isParamList = FALSE;
+	info->isKnrParamList = FALSE;
+	info->isConstructor = TRUE;
+}
+
 static int parseParens (statementInfo *const st, parenInfo *const info)
 {
 	tokenInfo *const token = activeToken (st);
@@ -2130,12 +2183,33 @@ static int parseParens (statementInfo *const st, parenInfo *const info)
 		switch (c)
 		{
 			case '&':
+				if (firstChar)
+				{
+					info->isPointer = TRUE;
+					info->isKnrParamList = FALSE;
+					if (identifierCount == 0)
+						info->isParamList = FALSE;
+					initToken (token);
+				}
+				else
+				{
+					c = cppGetc ();
+					if (c == '&')
+						setConstructorInfo (info);
+					else
+						cppUngetc (c);
+				}
+				break;
+
 			case '*':
-				info->isPointer = TRUE;
-				info->isKnrParamList = FALSE;
-				if (identifierCount == 0)
-					info->isParamList = FALSE;
-				initToken (token);
+				if (firstChar)
+				{
+					info->isPointer = TRUE;
+					info->isKnrParamList = FALSE;
+					if (identifierCount == 0)
+						info->isParamList = FALSE;
+					initToken (token);
+				}
 				break;
 
 			case ':':
@@ -2148,7 +2222,7 @@ static int parseParens (statementInfo *const st, parenInfo *const info)
 				if (c != '.')
 				{
 					cppUngetc (c);
-					info->isKnrParamList = FALSE;
+					setConstructorInfo (info);
 				}
 				else
 				{
@@ -2190,12 +2264,29 @@ static int parseParens (statementInfo *const st, parenInfo *const info)
 
 			case '<':
 				info->isKnrParamList = FALSE;
-				processAngleBracket ();
+				c = processAngleBracket ();
+				if (c == ';')
+				{
+					setConstructorInfo (info);
+					depth = 0;
+				}
+				else
+					skipToNonWhite ();
 				break;
 
 			case ')':
 				if (firstChar)
 					info->parameterCount = 0;
+				if (info->isPointer)
+				{
+					c = skipToNonWhite ();
+					if (c != '(')
+					{
+						info->isPointer = FALSE;
+						setConstructorInfo (info);
+					}
+					cppUngetc (c);
+				}
 				--depth;
 				break;
 
@@ -2203,34 +2294,43 @@ static int parseParens (statementInfo *const st, parenInfo *const info)
 				info->isKnrParamList = FALSE;
 				if (firstChar)
 				{
-					info->isNameCandidate = FALSE;
-					cppUngetc (c);
-					vStringClear (Signature);
-					skipMacro (st);
-					depth = 0;
-					vStringChop (Signature);
-				}
-				else if (isType (token, TOKEN_PAREN_NAME))
-				{
-					c = skipToNonWhite ();
-					if (c == '*')        /* check for function pointer */
-					{
-						skipToMatch ("()");
-						c = skipToNonWhite ();
-						if (c == '(')
-							skipToMatch ("()");
-						else
-							cppUngetc (c);
-					}
+					const tokenInfo *const prev  = prevToken (st, 1);
+					/* multiple parentheses may start complex expressions
+					 * inside  C++ constructors, but if prev token starts
+					 * with '_' we will heuristically suppose it is a macro */
+					if (isLanguage (Lang_cpp)  &&  prev->type == TOKEN_NAME  &&
+							vStringItem (prev->name, 0) != '_')
+						setConstructorInfo (info);
 					else
 					{
+						info->isNameCandidate = FALSE;
 						cppUngetc (c);
-						cppUngetc ('(');
-						info->nestedArgs = TRUE;
+						vStringClear (Signature);
+						skipMacro (st);
+						depth = 0;
+						vStringChop (Signature);
 					}
 				}
+				else if (isType (token, TOKEN_PAREN_NAME))
+					skipFunctionPointer(info);
 				else
 					++depth;
+				break;
+
+			case '/':
+			case '%':
+			case '>':
+			case '?':
+			case '|':
+			/* case '^': to be prototype of MS.NET managed class */
+				if (firstChar)
+					info->invalidContents = TRUE;
+			case '!':
+			case '+':
+			case '-':
+			case STRING_SYMBOL:
+			case CHAR_SYMBOL:
+				setConstructorInfo (info);
 				break;
 
 			default:
@@ -2244,7 +2344,21 @@ static int parseParens (statementInfo *const st, parenInfo *const info)
 						info->isKnrParamList = FALSE;
 					readIdentifier (token, c);
 					if (isType (token, TOKEN_NAME)  &&  info->isNameCandidate)
+					{
 						token->type = TOKEN_PAREN_NAME;
+						if (firstChar  &&  isLanguage(Lang_cpp))
+						{
+							c = skipToNonWhite ();
+							if (c == ')')
+							{
+								int c2 = skipToNonWhite ();
+								if (c2 == ';')
+									setConstructorInfo (info);
+								cppUngetc (c2);
+							}
+							cppUngetc (c);
+						}
+					}
 					else if (isType (token, TOKEN_KEYWORD))
 					{
 						if (token->keyword != KEYWORD_CONST &&
@@ -2252,9 +2366,19 @@ static int parseParens (statementInfo *const st, parenInfo *const info)
 						{
 							info->isKnrParamList = FALSE;
 							info->isNameCandidate = FALSE;
+							c = skipToNonWhite ();
+							if (c == '(')
+							{
+								vStringPut (Signature, c);
+								skipFunctionPointer (info);
+							}
+							else
+								cppUngetc (c);
 						}
 					}
 				}
+				else if (isdigit (c))
+					setConstructorInfo (info);
 				else
 				{
 					info->isParamList     = FALSE;
@@ -2268,9 +2392,11 @@ static int parseParens (statementInfo *const st, parenInfo *const info)
 	} while (! info->nestedArgs  &&  depth > 0  &&
 			 (info->isKnrParamList  ||  info->isNameCandidate));
 
-	if (! info->nestedArgs) while (depth > 0)
+	while (depth > 0)
 	{
 		skipToMatch ("()");
+		if (info->nestedArgs)
+			skipToMatch ("()");
 		--depth;
 	}
 
@@ -2281,12 +2407,22 @@ static int parseParens (statementInfo *const st, parenInfo *const info)
 	if (info->isKnrParamList)
 		vStringClear (Signature);
 	CollectingSignature = FALSE;
+
+	if (! info->isConstructor  &&  isLanguage (Lang_cpp))
+	{
+		int c = skipToNonWhite ();
+		if (c == ';')
+			info->isConstructor = info->nestedArgs;
+		cppUngetc (c);
+	}
+
 	return nextChar;
 }
 
 static void initParenInfo (parenInfo *const info)
 {
 	info->isPointer				= FALSE;
+	info->isConstructor			= FALSE;
 	info->isParamList			= TRUE;
 	info->isKnrParamList		= isLanguage (Lang_c);
 	info->isNameCandidate		= TRUE;
@@ -2295,11 +2431,13 @@ static void initParenInfo (parenInfo *const info)
 	info->parameterCount		= 0;
 }
 
+static void processInitializer (statementInfo *const st);
+
 static void analyzeParens (statementInfo *const st)
 {
 	tokenInfo *const prev = prevToken (st, 1);
 
-	if (st->inFunction  &&  ! st->assignment)
+	if (st->inFunction  &&  ! st->assignment  &&  ! st->isPointer)
 		st->notVariable = TRUE;
 	if (! isType (prev, TOKEN_NONE))  /* in case of ignored enclosing macros */
 	{
@@ -2313,6 +2451,11 @@ static void analyzeParens (statementInfo *const st)
 		cppUngetc (c);
 		if (info.invalidContents)
 			reinitStatement (st, FALSE);
+		else if (info.isConstructor)
+		{
+			st->notVariable = FALSE;
+			processInitializer (st);
+		}
 		else if (info.isNameCandidate  &&  isType (token, TOKEN_PAREN_NAME)  &&
 				 ! st->gotParenName  &&
 				 (! info.isParamList || ! st->haveQualifyingName  ||
@@ -2324,7 +2467,10 @@ static void analyzeParens (statementInfo *const st)
 			processName (st);
 			st->gotParenName = TRUE;
 			if (! (c == '('  &&  info.nestedArgs))
+			{
 				st->isPointer = info.isPointer;
+				st->notVariable = ! st->isPointer;
+			}
 		}
 		else if (! st->gotArgs  &&  info.isParamList)
 		{
