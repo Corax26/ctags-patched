@@ -2536,6 +2536,10 @@ static void processColon (statementInfo *const st)
 		{
 			readParents (st, ':');
 		}
+		else if (isLanguage (Lang_cpp) && st->declaration == DECL_ENUM)
+		{
+			cppUngetc(skipToOneOf("{"));
+		}
 		else if (parentDecl (st) == DECL_STRUCT)
 		{
 			c = skipToOneOf (",;");
