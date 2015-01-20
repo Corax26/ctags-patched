@@ -13,3 +13,4 @@ It contains the following improvements (in chronological order):
 * C/C++: don't add a macro tag when an #undef directive is encountered (seriously, why #undef should yield a macro tag?)
 * C++: support for C++11 typed enums (enum E : char {...};)
 * C++: support for C++11 enum classes
+* Ada: add Ada support using GNU Ada Project's [ada.c](http://sourceforge.net/p/gnuada/code/HEAD/tree/trunk/tools/ctags/ada.c)
